@@ -6,14 +6,17 @@ import {
     JulianDate,
     Cartesian3,
     Math,
-    Color
+    Color,
+    Transforms,
+    Matrix3,
+    Matrix4,
+    SceneMode,
+    ReferenceFrame,
 } from 'cesium';
 
 import { 
     twoline2satrec, 
     propagate,
-    eciToGeodetic,
-    gstime
 } from 'satellite.js';
 
 
@@ -41,6 +44,24 @@ const CesiumGlobe: React.FC = () => {
 
             // Ensure the sun light source is used
             viewer.scene.globe.enableLighting = true;
+
+
+            // Move camera to a fixed referencial, in order to not rotate togehter with earth rotation
+
+            function move_to_fixed() {
+                if (viewer.scene.mode !== SceneMode.SCENE3D) {
+                  return;
+                }
+              
+                const icrfToFixed = Transforms.computeIcrfToFixedMatrix(viewer.clock.currentTime);
+                const camera = viewer.camera;
+                const offset = Cartesian3.clone(camera.position);
+                const transform = Matrix4.fromRotationTranslation(icrfToFixed);
+                camera.lookAtTransform(transform, offset);  
+              }
+
+
+            viewer.scene.postUpdate.addEventListener(move_to_fixed);
             ///////////////////////////////////////////////////////
 
             ///////////////////////////////////////////////////////            
@@ -71,7 +92,7 @@ const CesiumGlobe: React.FC = () => {
                     outlineWidth: 2,
                 },
             });
-            
+              
             // Add orbit entity
             const orbitEntity = viewer.entities.add({
                 name: 'Satellite Orbit',
@@ -81,73 +102,71 @@ const CesiumGlobe: React.FC = () => {
                     material: Color.YELLOW,
                 },
             });
+        
+            // Precomputed orbit positions
+            let precomputedOrbitPositions: Cartesian3[] = [];
+            let nextRecomputeTime = JulianDate.clone(viewer.clock.currentTime);
 
-  
-            
-        // Precomputed orbit positions
-        let precomputedOrbitPositions: Cartesian3[] = [];
-        let nextRecomputeTime = JulianDate.clone(viewer.clock.currentTime);
+            // Function to propagate satellite and compute orbit
+            const propagateOrbit = () => {
+                const orbitPositions: Cartesian3[] = [];
+                const startTime = JulianDate.clone(viewer.clock.currentTime);
+                const stopTime = JulianDate.addSeconds(startTime, orbitalPeriod, new JulianDate());
 
-        // Function to propagate satellite and compute orbit
-        const propagateOrbit = () => {
+                for (
+                    let time = JulianDate.clone(startTime);
+                    JulianDate.lessThan(time, stopTime);
+                    JulianDate.addSeconds(time, step, time)
+                ) {
+                    const jdTime = JulianDate.toDate(time);
+                    const orbitPositionAndVelocity = propagate(satrec, jdTime);
 
-            const orbitPositions: Cartesian3[] = [];
-            const startTime = JulianDate.clone(viewer.clock.currentTime);
-            const stopTime = JulianDate.addSeconds(startTime, orbitalPeriod, new JulianDate());
+                    const orbitPositionEci = orbitPositionAndVelocity.position;
+                    
+                    // Directly use ECI coordinates (convert km to meters)
+                    const eciPosition = new Cartesian3(
+                        orbitPositionEci.x * 1000,
+                        orbitPositionEci.y * 1000,
+                        orbitPositionEci.z * 1000
+                    );
 
-            for (
-                let time = JulianDate.clone(startTime);
-                JulianDate.lessThan(time, stopTime);
-                JulianDate.addSeconds(time, step, time)
-            ) {
-                const orbitTime = JulianDate.toDate(time);
-                const orbitGmst = gstime(orbitTime);
-                const orbitPositionAndVelocity = propagate(satrec, orbitTime);
+                    orbitPositions.push(eciPosition);
+                    
+                }
 
-                const orbitPositionEci = orbitPositionAndVelocity.position;
-                const orbitPositionGd = eciToGeodetic(orbitPositionEci, orbitGmst);
+                precomputedOrbitPositions = orbitPositions; // Save the positions
+                nextRecomputeTime = JulianDate.addSeconds(startTime, orbitalPeriod, new JulianDate()); // Set next recompute time
 
-                const orbitLongitude = Math.toDegrees(orbitPositionGd.longitude);
-                const orbitLatitude = Math.toDegrees(orbitPositionGd.latitude);
-                const orbitHeight = orbitPositionGd.height * 1000;
+                // Update orbit polyline
+                orbitEntity.polyline.positions = orbitPositions;
+            };
 
-                orbitPositions.push(Cartesian3.fromDegrees(orbitLongitude, orbitLatitude, orbitHeight));
-    
+            // Function to update satellite position from precomputed data
+            const updateSatellitePosition = () => {
+                const currentTime = JulianDate.clone(viewer.clock.currentTime);
+
+                // Check if it's time to recompute the orbit
+                if (JulianDate.greaterThan(currentTime, nextRecomputeTime)) {
+                    propagateOrbit();
+                }
+
+            // Calculate the elapsed time since the last recompute
+            const elapsedSeconds = JulianDate.secondsDifference(currentTime, nextRecomputeTime) + orbitalPeriod;
+
+            // Calculate the index in the precomputed positions
+            const index = window.Math.round((elapsedSeconds % orbitalPeriod) / step);
+
+            // Ensure the index is within bounds
+            if (index >= 0 && index < precomputedOrbitPositions.length) {
+                satelliteEntity.position = precomputedOrbitPositions[index];
             }
+            };
 
-            precomputedOrbitPositions = orbitPositions; // Save the positions
-            nextRecomputeTime = JulianDate.addSeconds(startTime, orbitalPeriod, new JulianDate()); // Set next recompute time
+            // Initial propagation
+            propagateOrbit();
 
-            // Update orbit polyline
-            orbitEntity.polyline.positions = orbitPositions;
-        };
-
-        // Function to update satellite position from precomputed data
-        const updateSatellitePosition = () => {
-            const currentTime = JulianDate.clone(viewer.clock.currentTime);
-
-            // Check if it's time to recompute the orbit
-            if (JulianDate.greaterThan(currentTime, nextRecomputeTime)) {
-                propagateOrbit();
-            }
-
-           // Calculate the elapsed time since the last recompute
-           const elapsedSeconds = JulianDate.secondsDifference(currentTime, nextRecomputeTime) + orbitalPeriod;
-
-           // Calculate the index in the precomputed positions
-           const index = window.Math.round((elapsedSeconds % orbitalPeriod) / step);
-
-           // Ensure the index is within bounds
-           if (index >= 0 && index < precomputedOrbitPositions.length) {
-               satelliteEntity.position = precomputedOrbitPositions[index];
-           }
-        };
-
-        // Initial propagation
-        propagateOrbit();
-
-        // Update satellite and orbit on each clock tick
-        viewer.clock.onTick.addEventListener(updateSatellitePosition);
+            // Update satellite and orbit on each clock tick
+            viewer.clock.onTick.addEventListener(updateSatellitePosition);
 
             return () => {
                 viewer.destroy();
