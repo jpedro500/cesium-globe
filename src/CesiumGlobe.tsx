@@ -8,10 +8,9 @@ import {
     Math,
     Color,
     Transforms,
-    Matrix3,
     Matrix4,
     SceneMode,
-    ReferenceFrame,
+    CzmlDataSource
 } from 'cesium';
 
 import { 
@@ -44,8 +43,6 @@ const CesiumGlobe: React.FC = () => {
 
             // Ensure the sun light source is used
             viewer.scene.globe.enableLighting = true;
-
-
             // Move camera to a fixed referencial, in order to not rotate togehter with earth rotation
 
             function move_to_fixed() {
@@ -71,108 +68,87 @@ const CesiumGlobe: React.FC = () => {
 
             // Convert TLE to satellite record
             const satrec = twoline2satrec(tleLine1, tleLine2);
-            const meanMotion = satrec.no * (1440 / (2 * Math.PI)); // Orbits per day
-            const orbitalPeriod = 86400 / meanMotion; // Seconds per orbit
-            const step = 1;
-  
+            ///////////////////////////////////////////////////////
+            // Generate CZML Data
+            const czml = generateCzmlForOrbit(satrec, viewer);
 
-            // Add satellite entity
-            const satelliteEntity = viewer.entities.add({
-                name: 'ISS (ZARYA)',
-                position: Cartesian3.fromDegrees(0, 0, 0), // Temporary initial position
-                point: {
-                    pixelSize: 10,
-                    color: Color.RED,
-                },
-                label: {
-                    text: 'ISS',
-                    font: '12pt sans-serif',
-                    fillColor: Color.WHITE,
-                    outlineColor: Color.BLACK,
-                    outlineWidth: 2,
-                },
-            });
-              
-            // Add orbit entity
-            const orbitEntity = viewer.entities.add({
-                name: 'Satellite Orbit',
-                polyline: {
-                    positions: [],
-                    width: 2,
-                    material: Color.YELLOW,
-                },
-            });
+            // Load CZML into the viewer
+            const czmlDataSource = new CzmlDataSource();
+            czmlDataSource.load(czml);
+            viewer.dataSources.add(czmlDataSource);
+
+            ///////////////////////////////////////////////////////
         
-            // Precomputed orbit positions
-            let precomputedOrbitPositions: Cartesian3[] = [];
-            let nextRecomputeTime = JulianDate.clone(viewer.clock.currentTime);
 
-            // Function to propagate satellite and compute orbit
-            const propagateOrbit = () => {
-                const orbitPositions: Cartesian3[] = [];
-                const startTime = JulianDate.clone(viewer.clock.currentTime);
-                const stopTime = JulianDate.addSeconds(startTime, orbitalPeriod, new JulianDate());
-
-                for (
-                    let time = JulianDate.clone(startTime);
-                    JulianDate.lessThan(time, stopTime);
-                    JulianDate.addSeconds(time, step, time)
-                ) {
-                    const jdTime = JulianDate.toDate(time);
-                    const orbitPositionAndVelocity = propagate(satrec, jdTime);
-
-                    const orbitPositionEci = orbitPositionAndVelocity.position;
-                    
-                    // Directly use ECI coordinates (convert km to meters)
-                    const eciPosition = new Cartesian3(
-                        orbitPositionEci.x * 1000,
-                        orbitPositionEci.y * 1000,
-                        orbitPositionEci.z * 1000
-                    );
-
-                    orbitPositions.push(eciPosition);
-                    
-                }
-
-                precomputedOrbitPositions = orbitPositions; // Save the positions
-                nextRecomputeTime = JulianDate.addSeconds(startTime, orbitalPeriod, new JulianDate()); // Set next recompute time
-
-                // Update orbit polyline
-                orbitEntity.polyline.positions = orbitPositions;
-            };
-
-            // Function to update satellite position from precomputed data
-            const updateSatellitePosition = () => {
-                const currentTime = JulianDate.clone(viewer.clock.currentTime);
-
-                // Check if it's time to recompute the orbit
-                if (JulianDate.greaterThan(currentTime, nextRecomputeTime)) {
-                    propagateOrbit();
-                }
-
-            // Calculate the elapsed time since the last recompute
-            const elapsedSeconds = JulianDate.secondsDifference(currentTime, nextRecomputeTime) + orbitalPeriod;
-
-            // Calculate the index in the precomputed positions
-            const index = window.Math.round((elapsedSeconds % orbitalPeriod) / step);
-
-            // Ensure the index is within bounds
-            if (index >= 0 && index < precomputedOrbitPositions.length) {
-                satelliteEntity.position = precomputedOrbitPositions[index];
-            }
-            };
-
-            // Initial propagation
-            propagateOrbit();
-
-            // Update satellite and orbit on each clock tick
-            viewer.clock.onTick.addEventListener(updateSatellitePosition);
 
             return () => {
                 viewer.destroy();
             };
         }
     }, []);
+
+ ///////////////////////////////////////////////////////
+    // Function to generate CZML for the orbit
+    const generateCzmlForOrbit = (satrec: any, viewer: Viewer) => {
+        const startTime = JulianDate.now();
+        const orbitalPeriod = 86400 / (satrec.no * (1440 / (2 * Math.PI))); // Orbital period in seconds
+        const stopTime = JulianDate.addSeconds(startTime, orbitalPeriod, new JulianDate());
+        const step = 60; // Sample every 60 seconds
+
+        const czml: any[] = [
+            {
+                id: 'document',
+                name: 'Satellite Orbit',
+                version: '1.0',
+                clock: {
+                    interval: `${JulianDate.toIso8601(startTime)}/${JulianDate.toIso8601(stopTime)}`,
+                    currentTime: JulianDate.toIso8601(startTime),
+                    multiplier: 60, // Faster time progression
+                    range: 'LOOP_STOP',
+                },
+            },
+            {
+                id: 'satellite',
+                name: 'ISS (ZARYA)',
+                availability: `${JulianDate.toIso8601(startTime)}/${JulianDate.toIso8601(stopTime)}`,
+                position: {
+                    epoch: JulianDate.toIso8601(startTime),
+                    referenceFrame: 'INERTIAL', // Use the inertial frame
+                    cartesian: [], // Position samples will be added here
+                },
+                point: {
+                    pixelSize: 10,
+                    color: Color.RED.withAlpha(0.8),
+                },
+                path: {
+                    material: { solidColor: { color: Color.YELLOW.withAlpha(0.8) } },
+                    width: 2,
+                    resolution: 120, // Smooth path
+                },
+            },
+        ];
+
+        // Generate position samples
+        const positionData = [];
+        for (
+            let time = JulianDate.clone(startTime), seconds = 0;
+            JulianDate.lessThan(time, stopTime);
+            JulianDate.addSeconds(time, step, time), seconds += step
+        ) {
+            const currentDate = JulianDate.toDate(time);
+            const positionAndVelocity = propagate(satrec, currentDate);
+
+            if (positionAndVelocity && positionAndVelocity.position) {
+                const { x, y, z } = positionAndVelocity.position; // ECI in km
+                positionData.push(seconds, x * 1000, y * 1000, z * 1000); // Convert to meters
+            }
+        }
+
+        // Add position samples to the CZML
+        czml[1].position.cartesian = positionData;
+
+        return czml;
+    };
 
     return <div ref={viewerRef} style={{ width: '100%', height: '100vh' }} />;
 };
